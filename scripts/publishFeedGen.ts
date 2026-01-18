@@ -8,8 +8,8 @@ const run = async () => {
   // This pulls the info you typed into the Railway "Variables" tab
   const handle = process.env.FEEDGEN_HANDLE
   const password = process.env.FEEDGEN_PASSWORD
-  const recordName = 'fast-english-feed' // Change this to your feed's URL name
-  const displayName = 'My Fast Feed'      // Change this to the name people see
+  const recordName = 'new-and-notable' // Change this to your feed's URL name
+  const displayName = 'New and Notable'      // Change this to the name people see
   const description = 'English posts, 10+ likes, no images.' 
   const hostname = process.env.FEEDGEN_HOSTNAME
 
