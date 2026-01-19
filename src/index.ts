@@ -3,24 +3,39 @@ import FeedGenerator from './server'
 
 const run = async () => {
   dotenv.config()
+
   const hostname = maybeStr(process.env.FEEDGEN_HOSTNAME) ?? 'example.com'
   const serviceDid =
     maybeStr(process.env.FEEDGEN_SERVICE_DID) ?? `did:web:${hostname}`
+
   const server = FeedGenerator.create({
-    port: maybeInt(process.env.FEEDGEN_PORT) ?? 3000,
-    listenhost: maybeStr(process.env.FEEDGEN_LISTENHOST) ?? 'localhost',
+    // Railway injects PORT. Fall back to FEEDGEN_PORT only for local dev.
+    port: maybeInt(process.env.PORT) ?? maybeInt(process.env.FEEDGEN_PORT) ?? 3000,
+
+    // Must bind to 0.0.0.0 in containers (Railway). HOST is a common env var you already use.
+    listenhost:
+      maybeStr(process.env.HOST) ??
+      maybeStr(process.env.FEEDGEN_LISTENHOST) ??
+      '0.0.0.0',
+
     sqliteLocation: maybeStr(process.env.FEEDGEN_SQLITE_LOCATION) ?? ':memory:',
+
     subscriptionEndpoint:
       maybeStr(process.env.FEEDGEN_SUBSCRIPTION_ENDPOINT) ??
       'wss://bsky.network',
+
     publisherDid:
       maybeStr(process.env.FEEDGEN_PUBLISHER_DID) ?? 'did:example:alice',
+
     subscriptionReconnectDelay:
       maybeInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY) ?? 3000,
+
     hostname,
     serviceDid,
   })
+
   await server.start()
+
   console.log(
     `🤖 running feed generator at http://${server.cfg.listenhost}:${server.cfg.port}`,
   )
