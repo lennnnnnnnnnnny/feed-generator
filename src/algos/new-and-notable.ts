@@ -8,11 +8,13 @@ const SOURCE_FEED_AT_URI =
   'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/hot-classic'
 const SOURCE_LIMIT = 100
 
+// Extra content (“early traction”)
 const ROCKET_WINDOW_MINUTES = 10
 const ROCKET_DB_LIMIT = 200
 const ROCKET_MIN_AGE_SECONDS = 30
-const ROCKET_MAX_AGE_SECONDS = 180
-const ROCKET_MIN_LIKES_PER_MIN = 6
+const ROCKET_MAX_AGE_SECONDS = 600
+const ROCKET_MIN_LIKES = 5
+const ROCKET_MIN_LIKES_PER_MIN = 0 // set to 2 later if you want velocity back
 const ROCKET_MAX_URIS_TO_SCORE = 100
 const CHUNK_SIZE = 25
 
@@ -41,7 +43,7 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     })
     .map((item) => item.post.uri)
 
-  // 2) Rocket candidates from DB
+  // 2) Extra candidates from DB
   const windowStartIso = new Date(now - ROCKET_WINDOW_MINUTES * 60_000).toISOString()
 
   const dbRows = await ctx.db
@@ -85,6 +87,7 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     })
     .filter((p) => p.ageSeconds >= ROCKET_MIN_AGE_SECONDS)
     .filter((p) => p.ageSeconds <= ROCKET_MAX_AGE_SECONDS)
+    .filter((p) => p.likeCount >= ROCKET_MIN_LIKES)
     .filter((p) => p.likeRate >= ROCKET_MIN_LIKES_PER_MIN)
     .sort((a, b) => b.indexedAtMs - a.indexedAtMs)
 
@@ -106,7 +109,7 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     }),
   )
 
-  // 3) Merge with dedupe
+  // 3) Merge with dedupe (extras first, then Hot Classic)
   const seen = new Set<string>()
   const merged: string[] = []
 
