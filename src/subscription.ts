@@ -10,39 +10,34 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
 
     const ops = await getOpsByType(evt)
 
-    // 1. Identify posts to delete from your local database
     const postsToDelete = ops.posts.deletes.map((del) => del.uri)
 
-    // 2. Identify and filter new posts based on your specific rules
     const postsToCreate = ops.posts.creates
       .filter((create) => {
-        const text = create.record.text.toLowerCase()
-        
-        // Rule: Language must be English
-        const isEnglish = create.record.langs?.includes('en')
+        const record = create.record as any
+        const text = (record.text ?? '').toLowerCase()
 
-        // Rule: Must NOT have images
-        // This checks if the post has an 'embed' property of type 'images'
-        const hasImages = create.record.embed?.$type === 'app.bsky.embed.images'
-        const isImageFree = !hasImages
+        // English only
+        const isEnglish = record.langs?.includes('en')
 
-        // Rule: Exclude specific "kink" phrases to keep the feed clean
-        const excludePhrases = ['diaper check', 'big belly']
-        const isClean = !excludePhrases.some(phrase => text.includes(phrase))
+        // OG posts only (no replies)
+        const isOriginal = !record.reply
 
-        // Only save the post if it passes all three tests
-        return isEnglish && isImageFree && isClean
+        // Text-only (blocks images, link cards, quote posts)
+        const isTextOnly = !record.embed
+
+        // Phrase blacklist
+        const excludePhrases = ['diaper', 'belly', 'kink']
+        const isClean = !excludePhrases.some((p) => text.includes(p))
+
+        return isEnglish && isOriginal && isTextOnly && isClean
       })
-      .map((create) => {
-        // Map the filtered posts to your database format
-        return {
-          uri: create.uri,
-          cid: create.cid,
-          indexedAt: new Date().toISOString(),
-        }
-      })
+      .map((create) => ({
+        uri: create.uri,
+        cid: create.cid,
+        indexedAt: new Date().toISOString(),
+      }))
 
-    // 3. Update your database
     if (postsToDelete.length > 0) {
       await this.db
         .deleteFrom('post')
