@@ -4,20 +4,16 @@ import { BskyAgent } from '@atproto/api'
 
 export const shortname = 'new-and-notable'
 
-// Hot Classic feed AT URI
 const SOURCE_FEED_AT_URI =
   'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/hot-classic'
-
-// Hot Classic pull size (ask for more so filtering images still leaves plenty)
 const SOURCE_LIMIT = 100
 
-// Rocket detection knobs
-const ROCKET_WINDOW_MINUTES = 10        // only look at very recent DB posts
-const ROCKET_DB_LIMIT = 200             // how many recent candidates to consider
-const ROCKET_MIN_AGE_SECONDS = 30       // avoid dividing by tiny ages
-const ROCKET_MAX_AGE_SECONDS = 180      // "one minute mark vibe" up to 3 minutes
-const ROCKET_MIN_LIKES_PER_MIN = 6      // your rule: 6+ likes per minute
-const ROCKET_MAX_URIS_TO_SCORE = 100    // cap API calls
+const ROCKET_WINDOW_MINUTES = 10
+const ROCKET_DB_LIMIT = 200
+const ROCKET_MIN_AGE_SECONDS = 30
+const ROCKET_MAX_AGE_SECONDS = 180
+const ROCKET_MIN_LIKES_PER_MIN = 6
+const ROCKET_MAX_URIS_TO_SCORE = 100
 const CHUNK_SIZE = 25
 
 const agent = new BskyAgent({
@@ -28,14 +24,13 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
   const limit = params.limit ?? 50
   const now = Date.now()
 
-  // 1) Pull Hot Classic (for guaranteed "loud" content)
+  // 1) Hot Classic
   const hotRes = await agent.api.app.bsky.feed.getFeed({
     feed: SOURCE_FEED_AT_URI,
     limit: SOURCE_LIMIT,
     cursor: params.cursor,
   })
 
-  // Filter out ONLY image embeds from Hot Classic
   const hotFilteredUris = hotRes.data.feed
     .filter((item) => {
       const post = item.post
@@ -46,7 +41,7 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     })
     .map((item) => item.post.uri)
 
-  // 2) Pull very recent candidates from YOUR DB for "rocket" detection
+  // 2) Rocket candidates from DB
   const windowStartIso = new Date(now - ROCKET_WINDOW_MINUTES * 60_000).toISOString()
 
   const dbRows = await ctx.db
@@ -61,7 +56,6 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
   const indexedAtByUri = new Map(newestRows.map((r) => [r.uri, r.indexedAt]))
   const uris = newestRows.map((r) => r.uri)
 
-  // Fetch like counts for recent candidates (chunked)
   const chunks: string[][] = []
   for (let i = 0; i < uris.length; i += CHUNK_SIZE) chunks.push(uris.slice(i, i + CHUNK_SIZE))
 
@@ -73,8 +67,7 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     }
   }
 
-  // Compute rocket score and select only fast-risers
-  const rocketUris = recentWithLikes
+  const rockets = recentWithLikes
     .map((p) => {
       const indexedAt = indexedAtByUri.get(p.uri)
       const indexedAtMs = indexedAt ? Date.parse(indexedAt) : 0
@@ -93,12 +86,27 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     .filter((p) => p.ageSeconds >= ROCKET_MIN_AGE_SECONDS)
     .filter((p) => p.ageSeconds <= ROCKET_MAX_AGE_SECONDS)
     .filter((p) => p.likeRate >= ROCKET_MIN_LIKES_PER_MIN)
-    // newest first (so it feels live)
     .sort((a, b) => b.indexedAtMs - a.indexedAtMs)
-    .map((p) => p.uri)
 
-  // 3) Merge: rockets first, then Hot Classic (both already image-filtered for hot)
-  // Dedupe while preserving order
+  const rocketUris = rockets.map((r) => r.uri)
+
+  // DEBUG LOGS (one line, readable)
+  console.log(
+    JSON.stringify({
+      hotClassic_in: hotRes.data.feed.length,
+      hotClassic_noImages: hotFilteredUris.length,
+      dbCandidates: dbRows.length,
+      scoredCandidates: recentWithLikes.length,
+      rocketsQualified: rocketUris.length,
+      rocketsSample: rockets.slice(0, 3).map((r) => ({
+        likes: r.likeCount,
+        ageSec: Math.round(r.ageSeconds),
+        ratePerMin: Number(r.likeRate.toFixed(2)),
+      })),
+    }),
+  )
+
+  // 3) Merge with dedupe
   const seen = new Set<string>()
   const merged: string[] = []
 
@@ -118,6 +126,6 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
 
   return {
     feed: merged.slice(0, limit).map((uri) => ({ post: uri })),
-    cursor: hotRes.data.cursor, // keep Hot Classic pagination behavior
+    cursor: hotRes.data.cursor,
   }
 }
