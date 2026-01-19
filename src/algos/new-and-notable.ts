@@ -9,7 +9,7 @@ const WINDOW_MINUTES = 60      // Look back 1 hour
 const DB_LIMIT = 1000          // Pull 1000 posts to find enough "hot" ones
 const MAX_URIS_TO_SCORE = 400  // Check live likes for 400 newest candidates
 const CHUNK_SIZE = 25          // API batch size
-const MIN_LIKES_THRESHOLD = 12 // The "Loudness" floor
+const MIN_LIKES_THRESHOLD = 5 // The "Loudness" floor
 
 const agent = new BskyAgent({
   service: process.env.FEEDGEN_APPVIEW_URL ?? 'https://api.bsky.app',
