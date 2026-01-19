@@ -5,13 +5,13 @@ import { BskyAgent } from '@atproto/api'
 const MIN_LIKES = 12
 export const shortname = 'new-and-notable'
 
-// Create a public AppView client
+// Public AppView client
 const agent = new BskyAgent({
   service: process.env.FEEDGEN_APPVIEW_URL ?? 'https://api.bsky.app',
 })
 
 export const handler = async (ctx: AppContext, params: QueryParams) => {
-  // Pull recent candidates from DB (grab more than you need, we will filter down)
+  // Pull recent candidates from DB
   const rows = await ctx.db
     .selectFrom('post')
     .selectAll()
@@ -21,10 +21,12 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
 
   if (rows.length === 0) return { feed: [] }
 
-  // AppView limit is typically 25 uris per call, so chunk
+  // AppView getPosts is typically capped per request, so chunk
   const uris = rows.map((r) => r.uri)
   const chunks: string[][] = []
-  for (let i = 0; i < uris.length; i += 25) chunks.push(uris.slice(i, i + 25))
+  for (let i = 0; i < uris.length; i += 25) {
+    chunks.push(uris.slice(i, i + 25))
+  }
 
   const postsWithLikes: { uri: string; likeCount: number }[] = []
 
@@ -39,7 +41,6 @@ export const handler = async (ctx: AppContext, params: QueryParams) => {
     .filter((p) => p.likeCount >= MIN_LIKES)
     .sort((a, b) => b.likeCount - a.likeCount)
 
-  // Respect requested limit if provided
   const limit = params.limit ?? 50
   const feed = qualified.slice(0, limit).map((p) => ({ post: p.uri }))
 
