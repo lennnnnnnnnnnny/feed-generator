@@ -13,25 +13,23 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
     const postsToDelete = ops.posts.deletes.map((del) => del.uri)
 
     const postsToCreate = ops.posts.creates
-      .filter((create) => {
-        const record = create.record as any
-        const text = (record.text ?? '').toLowerCase()
+  .filter((create) => {
+    const text = create.record.text.toLowerCase()
+    
+    // Check if it's a quote post
+    // A quote post embeds a specific record (the post being quoted)
+    const isQuote = create.record.embed?.$type === 'app.bsky.embed.record'
+    
+    // Your existing English and Clean checks
+    const isEnglish = create.record.langs?.includes('en')
+    const excludePhrases = ['diaper check', 'big belly']
+    const isClean = !excludePhrases.some(phrase => text.includes(phrase))
 
-        // English only
-        const isEnglish = record.langs?.includes('en')
-
-        // OG posts only (no replies)
-        const isOriginal = !record.reply
-
-        // Text-only (blocks images, link cards, quote posts)
-        const isTextOnly = !record.embed
-
-        // Phrase blacklist
-        const excludePhrases = ['diaper', 'belly', 'kink']
-        const isClean = !excludePhrases.some((p) => text.includes(p))
-
-        return isEnglish && isOriginal && isTextOnly && isClean
-      })
+    // Allow the post if it passes your clean/lang checks 
+    // AND is either a regular post OR a quote post
+    return isEnglish && isClean && (text.length > 0 || isQuote)
+  })
+      
       .map((create) => ({
         uri: create.uri,
         cid: create.cid,
