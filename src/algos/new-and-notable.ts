@@ -1,88 +1,59 @@
-import { QueryParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
-import { AppContext } from '../config'
-import { BskyAgent } from '@atproto/api'
+import {
+  OutputSchema as RepoEvent,
+  isCommit,
+} from './lexicon/types/com/atproto/sync/subscribeRepos'
+import { FirehoseSubscriptionBase, getOpsByType } from './util/subscription'
 
-const MIN_LIKES = 12
-const WINDOW_MINUTES = 60
-const NUDGE_WINDOW_MINUTES = 5
+export class FirehoseSubscription extends FirehoseSubscriptionBase {
+  async handleEvent(evt: RepoEvent) {
+    if (!isCommit(evt)) return
 
-export const shortname = 'new-and-notable'
+    const ops = await getOpsByType(evt)
 
-// Public AppView client
-const agent = new BskyAgent({
-  service: process.env.FEEDGEN_APPVIEW_URL ?? 'https://api.bsky.app',
-})
+    const postsToDelete = ops.posts.deletes.map((del) => del.uri)
 
-export const handler = async (ctx: AppContext, params: QueryParams) => {
-  // Pull recent candidates from DB
-  const rows = await ctx.db
-    .selectFrom('post')
-    .selectAll()
-    .orderBy('indexedAt', 'desc')
-    .limit(200)
-    .execute()
+    const postsToCreate = ops.posts.creates
+      .filter((create) => {
+        const record = create.record as any
+        const text = (record.text ?? '').toLowerCase()
 
-  if (rows.length === 0) return { feed: [] }
+        // OG posts only (no replies)
+        const isOriginal = !record.reply
 
-  // uri -> indexedAt lookup
-  const indexedAtByUri = new Map(rows.map((r) => [r.uri, r.indexedAt]))
+        // Text-only (no embeds at all)
+        const isTextOnly = !record.embed
 
-  // AppView getPosts is typically capped per request, so chunk
-  const uris = rows.map((r) => r.uri)
-  const chunks: string[][] = []
-  for (let i = 0; i < uris.length; i += 25) {
-    chunks.push(uris.slice(i, i + 25))
-  }
+        // Language: allow if explicitly English OR if langs is missing
+        const langs = record.langs as string[] | undefined
+        const isEnglishOrUnknown = !langs || langs.includes('en')
 
-  const postsWithLikes: { uri: string; likeCount: number }[] = []
+        // Phrase blacklist (edit as you like)
+        const excludePhrases = ['diaper', 'big belly', 'abdl', 'ssbbw', 'feeder', 'feedee']
+        const isClean = !excludePhrases.some((p) => text.includes(p))
 
-  for (const chunk of chunks) {
-    const res = await agent.api.app.bsky.feed.getPosts({ uris: chunk })
-    for (const p of res.data.posts) {
-      postsWithLikes.push({ uri: p.uri, likeCount: p.likeCount ?? 0 })
+        return isOriginal && isTextOnly && isEnglishOrUnknown && isClean
+      })
+      .map((create) => ({
+        uri: create.uri,
+        cid: create.cid,
+        indexedAt: new Date().toISOString(),
+      }))
+
+    if (postsToDelete.length > 0) {
+      await this.db
+        .deleteFrom('post')
+        .where('uri', 'in', postsToDelete)
+        .execute()
+    }
+
+    if (postsToCreate.length > 0) {
+      await this.db
+        .insertInto('post')
+        .values(postsToCreate)
+        .onConflict((oc) => oc.doNothing())
+        .execute()
+
+      console.log(`saved ${postsToCreate.length} posts`)
     }
   }
-
-  const now = Date.now()
-
-  const candidates = postsWithLikes
-    .map((p) => {
-      const indexedAt = indexedAtByUri.get(p.uri)
-      const ageMs = indexedAt ? now - Date.parse(indexedAt) : Number.POSITIVE_INFINITY
-      const ageMinutes = ageMs / 60000
-
-      return {
-        uri: p.uri,
-        likeCount: p.likeCount,
-        indexedAt: indexedAt ?? new Date(0).toISOString(),
-        ageMinutes,
-      }
-    })
-    // Only posts seen within the last hour
-    .filter((p) => p.ageMinutes <= WINDOW_MINUTES)
-    // Only posts with enough likes
-    .filter((p) => p.likeCount >= MIN_LIKES)
-    // Mostly time-ordered (newest first), but allow likes to nudge order within 5 minutes
-    .sort((a, b) => {
-      const aTime = Date.parse(a.indexedAt)
-      const bTime = Date.parse(b.indexedAt)
-
-      // Primary: newest first
-      const timeDiff = bTime - aTime
-
-      // If within nudge window, use likes as a tie-breaker
-      const withinNudge = Math.abs(aTime - bTime) <= NUDGE_WINDOW_MINUTES * 60_000
-
-      if (withinNudge) {
-        const likeDiff = b.likeCount - a.likeCount
-        if (likeDiff !== 0) return likeDiff
-      }
-
-      return timeDiff
-    })
-
-  const limit = params.limit ?? 50
-  const feed = candidates.slice(0, limit).map((p) => ({ post: p.uri }))
-
-  return { feed }
 }
