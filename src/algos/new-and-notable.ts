@@ -1,59 +1,98 @@
-import {
-  OutputSchema as RepoEvent,
-  isCommit,
-} from './lexicon/types/com/atproto/sync/subscribeRepos'
-import { FirehoseSubscriptionBase, getOpsByType } from './util/subscription'
+import { QueryParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+import { AppContext } from '../config'
+import { BskyAgent } from '@atproto/api'
 
-export class FirehoseSubscription extends FirehoseSubscriptionBase {
-  async handleEvent(evt: RepoEvent) {
-    if (!isCommit(evt)) return
+export const shortname = 'new-and-notable'
 
-    const ops = await getOpsByType(evt)
+// Tuning knobs
+const WINDOW_MINUTES = 60
+const NUDGE_WINDOW_MINUTES = 5
 
-    const postsToDelete = ops.posts.deletes.map((del) => del.uri)
+const MIN_LIKES_MAIN = 12
+const MIN_LIKES_FRESH = 6
+const FRESH_MINUTES = 10
 
-    const postsToCreate = ops.posts.creates
-      .filter((create) => {
-        const record = create.record as any
-        const text = (record.text ?? '').toLowerCase()
+// Hard caps to prevent timeouts
+const DB_LIMIT = 300               // read at most this many rows from sqlite
+const MAX_URIS_TO_SCORE = 120      // only fetch stats for at most this many newest posts
+const CHUNK_SIZE = 25              // AppView chunk size
 
-        // OG posts only (no replies)
-        const isOriginal = !record.reply
+const agent = new BskyAgent({
+  service: process.env.FEEDGEN_APPVIEW_URL ?? 'https://api.bsky.app',
+})
 
-        // Text-only (no embeds at all)
-        const isTextOnly = !record.embed
+export const handler = async (ctx: AppContext, params: QueryParams) => {
+  const now = Date.now()
+  const windowStartIso = new Date(now - WINDOW_MINUTES * 60_000).toISOString()
 
-        // Language: allow if explicitly English OR if langs is missing
-        const langs = record.langs as string[] | undefined
-        const isEnglishOrUnknown = !langs || langs.includes('en')
+  // Only grab rows within the time window (huge speedup)
+  const rows = await ctx.db
+    .selectFrom('post')
+    .selectAll()
+    .where('indexedAt', '>=', windowStartIso)
+    .orderBy('indexedAt', 'desc')
+    .limit(DB_LIMIT)
+    .execute()
 
-        // Phrase blacklist (edit as you like)
-        const excludePhrases = ['diaper', 'big belly', 'abdl', 'ssbbw', 'feeder', 'feedee']
-        const isClean = !excludePhrases.some((p) => text.includes(p))
+  if (rows.length === 0) return { feed: [] }
 
-        return isOriginal && isTextOnly && isEnglishOrUnknown && isClean
-      })
-      .map((create) => ({
-        uri: create.uri,
-        cid: create.cid,
-        indexedAt: new Date().toISOString(),
-      }))
+  // Keep only the newest N to score (prevents tons of API calls)
+  const newestRows = rows.slice(0, MAX_URIS_TO_SCORE)
 
-    if (postsToDelete.length > 0) {
-      await this.db
-        .deleteFrom('post')
-        .where('uri', 'in', postsToDelete)
-        .execute()
-    }
+  const indexedAtByUri = new Map(newestRows.map((r) => [r.uri, r.indexedAt]))
 
-    if (postsToCreate.length > 0) {
-      await this.db
-        .insertInto('post')
-        .values(postsToCreate)
-        .onConflict((oc) => oc.doNothing())
-        .execute()
+  const uris = newestRows.map((r) => r.uri)
+  const chunks: string[][] = []
+  for (let i = 0; i < uris.length; i += CHUNK_SIZE) {
+    chunks.push(uris.slice(i, i + CHUNK_SIZE))
+  }
 
-      console.log(`saved ${postsToCreate.length} posts`)
+  const postsWithLikes: { uri: string; likeCount: number }[] = []
+
+  // Fetch stats (bounded number of calls)
+  for (const chunk of chunks) {
+    const res = await agent.api.app.bsky.feed.getPosts({ uris: chunk })
+    for (const p of res.data.posts) {
+      postsWithLikes.push({ uri: p.uri, likeCount: p.likeCount ?? 0 })
     }
   }
+
+  const candidates = postsWithLikes
+    .map((p) => {
+      const indexedAt = indexedAtByUri.get(p.uri)
+      const ageMs = indexedAt ? now - Date.parse(indexedAt) : Number.POSITIVE_INFINITY
+      const ageMinutes = ageMs / 60000
+
+      return {
+        uri: p.uri,
+        likeCount: p.likeCount,
+        indexedAt: indexedAt ?? new Date(0).toISOString(),
+        ageMinutes,
+      }
+    })
+    // Safety: ensure in window
+    .filter((p) => p.ageMinutes <= WINDOW_MINUTES)
+    // Age-based like thresholds
+    .filter((p) => {
+      if (p.ageMinutes <= FRESH_MINUTES) return p.likeCount >= MIN_LIKES_FRESH
+      return p.likeCount >= MIN_LIKES_MAIN
+    })
+    // Mostly time order, likes only nudge within 5 minutes
+    .sort((a, b) => {
+      const aTime = Date.parse(a.indexedAt)
+      const bTime = Date.parse(b.indexedAt)
+
+      const timeDiff = bTime - aTime
+
+      const withinNudge = Math.abs(aTime - bTime) <= NUDGE_WINDOW_MINUTES * 60_000
+      if (withinNudge) {
+        const likeDiff = b.likeCount - a.likeCount
+        if (likeDiff !== 0) return likeDiff
+      }
+
+      return timeDiff
+    })
+
+  const limit = params.limit ?? 50
+  return { feed: candidates.slice(0, limit).map((p) => ({ post: p.uri })) }
 }
